@@ -1,0 +1,17 @@
+# macOS metadata
+.DS_Store
+
+# Build artifacts
+build/
+*.app
+
+# Swift / Xcode local build data
+.build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# User-local state
+*.swp
+*.swo
