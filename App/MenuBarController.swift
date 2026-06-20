@@ -17,11 +17,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastConnectedState: Bool?
     private var fallbackTimer: Timer?
     private weak var startAtLoginItem: NSMenuItem?
-    private var isTrustTunnelBusy = false
-
-    // Held during the setup dialog so Browse button actions can update the fields.
-    private var setupExecField: NSTextField?
-    private var setupConfigField: NSTextField?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let button = statusItem.button {
@@ -32,12 +27,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         LaunchAtLoginManager.syncPreferenceAtLaunch()
-
-        // Rebuild menu whenever the CLI process starts, stops, or dies on its own.
-        TrustTunnelManager.onStateChanged = { [weak self] in
-            self?.rebuildMenu()
-        }
-
         rebuildMenu()
         updateIcon(connected: false)
 
@@ -87,118 +76,6 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
-    }
-
-    @objc private func toggleTrustTunnel() {
-        guard !isTrustTunnelBusy else { return }
-        isTrustTunnelBusy = true
-        rebuildMenu()
-
-        if TrustTunnelManager.isRunning {
-            TrustTunnelManager.stop {
-                self.isTrustTunnelBusy = false
-                self.rebuildMenu()
-            }
-        } else {
-            TrustTunnelManager.start { _ in
-                self.isTrustTunnelBusy = false
-                self.rebuildMenu()
-            }
-        }
-    }
-
-    @objc private func showTrustTunnelSetup() {
-        let alert = NSAlert()
-        alert.messageText = "TrustTunnel CLI Setup"
-        alert.informativeText = "Enter the paths to the TrustTunnel executable and config file."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        // Layout constants
-        let containerWidth: CGFloat = 460
-        let labelWidth: CGFloat     = 90
-        let fieldX: CGFloat         = 98
-        let browseWidth: CGFloat    = 80
-        let fieldWidth              = containerWidth - fieldX - 6 - browseWidth
-        let browseX                 = fieldX + fieldWidth + 6
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: containerWidth, height: 68))
-
-        // --- Executable row ---
-        let execLabel = NSTextField(labelWithString: "Executable:")
-        execLabel.frame = NSRect(x: 0, y: 46, width: labelWidth, height: 20)
-        execLabel.alignment = .right
-
-        let execField = NSTextField(frame: NSRect(x: fieldX, y: 44, width: fieldWidth, height: 22))
-        execField.stringValue       = TrustTunnelManager.executablePath ?? TrustTunnelManager.defaultExecutablePath
-        execField.placeholderString = TrustTunnelManager.defaultExecutablePath
-
-        let execBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseExecutable))
-        execBrowse.frame      = NSRect(x: browseX, y: 44, width: browseWidth, height: 22)
-        execBrowse.bezelStyle = .rounded
-
-        // --- Config file row ---
-        let configLabel = NSTextField(labelWithString: "Config file:")
-        configLabel.frame = NSRect(x: 0, y: 16, width: labelWidth, height: 20)
-        configLabel.alignment = .right
-
-        let configField = NSTextField(frame: NSRect(x: fieldX, y: 14, width: fieldWidth, height: 22))
-        configField.stringValue       = TrustTunnelManager.configPath ?? TrustTunnelManager.defaultConfigPath
-        configField.placeholderString = TrustTunnelManager.defaultConfigPath
-
-        let configBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseConfig))
-        configBrowse.frame      = NSRect(x: browseX, y: 14, width: browseWidth, height: 22)
-        configBrowse.bezelStyle = .rounded
-
-        container.addSubview(execLabel)
-        container.addSubview(execField)
-        container.addSubview(execBrowse)
-        container.addSubview(configLabel)
-        container.addSubview(configField)
-        container.addSubview(configBrowse)
-        alert.accessoryView = container
-
-        // Store fields so browse actions can update them while the dialog is open.
-        setupExecField   = execField
-        setupConfigField = configField
-        defer {
-            setupExecField   = nil
-            setupConfigField = nil
-        }
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let exec = execField.stringValue.trimmingCharacters(in: .whitespaces)
-        let conf = configField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !exec.isEmpty, !conf.isEmpty else { return }
-
-        TrustTunnelManager.save(executablePath: exec, configPath: conf)
-        rebuildMenu()
-    }
-
-    @objc private func browseExecutable() {
-        let panel = NSOpenPanel()
-        panel.title                = "Select TrustTunnel Executable"
-        panel.canChooseFiles       = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        if let current = setupExecField?.stringValue, !current.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent()
-        }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        setupExecField?.stringValue = url.path
-    }
-
-    @objc private func browseConfig() {
-        let panel = NSOpenPanel()
-        panel.title                = "Select TrustTunnel Config File"
-        panel.canChooseFiles       = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        if let current = setupConfigField?.stringValue, !current.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent()
-        }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        setupConfigField?.stringValue = url.path
     }
 
     @objc private func toggleStartAtLogin() {
@@ -257,19 +134,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        let cliRunning = TrustTunnelManager.isRunning
-
         if services.isEmpty {
             menu.addItem(withTitle: "No VPN services found", action: nil, keyEquivalent: "")
         } else {
             for service in services {
-                // Gray out VPN items while the CLI is active — using both at once
-                // risks conflicting network configurations.
-                let item = NSMenuItem(
-                    title: service.name,
-                    action: cliRunning ? nil : #selector(toggleService(_:)),
-                    keyEquivalent: ""
-                )
+                let item = NSMenuItem(title: service.name, action: #selector(toggleService(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = service.id
                 item.state = service.isConnected ? .on : .off
@@ -277,33 +146,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        if TrustTunnelManager.isConfigured {
-            let title: String
-            if isTrustTunnelBusy {
-                title = TrustTunnelManager.isRunning ? "Stopping TrustTunnel CLI…" : "Starting TrustTunnel CLI…"
-            } else {
-                title = TrustTunnelManager.isRunning ? "Stop TrustTunnel CLI" : "Run TrustTunnel CLI"
-            }
-            let tunnelItem = NSMenuItem(
-                title: title,
-                action: isTrustTunnelBusy ? nil : #selector(toggleTrustTunnel),
-                keyEquivalent: ""
-            )
-            tunnelItem.target = self
-            menu.addItem(tunnelItem)
-        }
-
         menu.addItem(.separator())
-
-        if !TrustTunnelManager.isConfigured {
-            let addItem = NSMenuItem(title: "Add TrustTunnel CLI", action: #selector(showTrustTunnelSetup), keyEquivalent: "")
-            addItem.target = self
-            menu.addItem(addItem)
-        } else {
-            let configureItem = NSMenuItem(title: "Configure TrustTunnel CLI", action: #selector(showTrustTunnelSetup), keyEquivalent: "")
-            configureItem.target = self
-            menu.addItem(configureItem)
-        }
 
         let startAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
         startAtLoginItem.target = self
